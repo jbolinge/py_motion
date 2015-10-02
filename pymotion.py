@@ -1,13 +1,15 @@
 #! /usr/bin/python
 
-import argparse
-import datetime
-import imutils
-import time
+import smtplib
+import datetime as dt
+import imutils, time, json, warnings
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage
 import cv2
 
-def run_motion(camera, min_area):
-	first_frame = None
+def run_motion(camera, conf):
+	avg = None
 	while True:
 		(grabbed, frame) = camera.read()
 		text = "Unoccupied"
@@ -16,15 +18,16 @@ def run_motion(camera, min_area):
 		frame = imutils.resize(frame, width=500)
 		gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 		gray = cv2.GaussianBlur(gray, (21, 21), 0)
-		if first_frame is None:
-			first_frame = gray
+		if avg is None:
+			avg = gray.copy().astype("float")
 			continue
-		frameDelta = cv2.absdiff(first_frame, gray)
-		thresh = cv2.threshold(frameDelta, 25, 255, cv2.THRESH_BINARY)[1]
+		cv2.accumulateWeighted(gray, avg, 0.5)
+		frameDelta = cv2.absdiff(gray, cv2.convertScaleAbs(avg))
+		thresh = cv2.threshold(frameDelta, conf["delta_thresh"], 255, cv2.THRESH_BINARY)[1]
 		thresh = cv2.dilate(thresh, None, iterations=2)
 		(_, cnts, _) = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 		for c in cnts:
-			if cv2.contourArea(c) < min_area:
+			if cv2.contourArea(c) < conf["min_area"]:
 				continue
 			(x, y, w, h) = cv2.boundingRect(c)
 			cv2.rectangle(frame, (x,y), (x+w, y+h), (0, 255, 0), 2)
@@ -38,16 +41,33 @@ def run_motion(camera, min_area):
 		if key == ord("q"):
 			break
 
+def send_mms(image_filename, conf):
+	now = dt.datetime.now()
+	now_txt = now.strftime('%B-%d-%Y %H:%M:%S')
+	msg = MIMEMultipart()
+	msg['To'] = conf["mms_to"]
+	msg['From'] = conf["smtp_user"]
+	msgText = MIMEText("Motion detected! %s" % now)
+	msgText.set_charset("ISO-8859-1")
+	msg.attach(msgText)
+	with open('images/' + image_filename, 'rb') as f:
+		attachment = MIMEImage(f.read())
+	attachment.add_header('Content-Disposition','attachment',filename=image_filename)
+	msg.attach(attachment)
+	s = smtplib.SMTP(conf["smtp_server"], conf["smtp_port"])
+	s.ehlo()
+	s.starttls()
+	s.ehlo()
+	s.login(conf["smtp_user"], conf["smtp_pass"])
+	s.sendmail(conf["smtp_user"], conf["mms_to"].split(","), msg.as_string())
+	s.quit()
+
 if __name__=='__main__':
-	ap = argparse.ArgumentParser()
-	ap.add_argument("-v", "--video", help="path to the video file")
-	ap.add_argument("-a", "--min-area", type=int, default=500, help="minimum area")
-	args = vars(ap.parse_args())
-	if args.get("video", None) is None:
-		camera = cv2.VideoCapture(0)
-		time.sleep(0.25)
-	else:
-		camera = cv2.VideoCapture(args["video"])
-	run_motion(camera, args["min_area"])
+	warnings.filterwarnings("ignore")
+	with open("conf.json", 'r') as f:
+		conf = json.load(f)
+	camera = cv2.VideoCapture(0)
+	time.sleep(0.25)
+	run_motion(camera, conf)
 	camera.release()
 	cv2.destroyAllWindows()
